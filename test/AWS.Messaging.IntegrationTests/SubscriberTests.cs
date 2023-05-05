@@ -14,21 +14,25 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Xunit;
 using Amazon.SQS.Model;
+using Xunit.Abstractions;
+using Microsoft.VisualStudio.TestPlatform.Utilities;
 
 namespace AWS.Messaging.IntegrationTests;
 
 public class SubscriberTests : IAsyncLifetime
 {
+    private readonly ITestOutputHelper _output;
     private readonly IAmazonSQS _sqsClient;
     private readonly IServiceCollection _serviceCollection;
     private string _sqsQueueUrl;
 
-    public SubscriberTests()
+    public SubscriberTests(ITestOutputHelper output)
     {
         _sqsClient = new AmazonSQSClient();
         _serviceCollection = new ServiceCollection();
         _serviceCollection.AddLogging(x => x.AddInMemoryLogger());
         _sqsQueueUrl = string.Empty;
+        _output = output;
     }
 
     public async Task InitializeAsync()
@@ -308,9 +312,13 @@ public class SubscriberTests : IAsyncLifetime
         var inMemoryLogger = serviceProvider.GetRequiredService<InMemoryLogger>();
         var errorMessages = inMemoryLogger.Logs.Where(x => x.Message.Equals("Failed to create a MessageEnvelope"));
         Assert.NotEmpty(errorMessages);
+        _output.WriteLine($"errorMessages.Count(): {errorMessages.Count()}");
+        _output.WriteLine($"numberOfMessages: {numberOfMessages}");
         Assert.True(errorMessages.Count() >= numberOfMessages);
-        //Assert.True(timeElapsed.TotalSeconds >= 60);
-        //Assert.True(source.IsCancellationRequested);
+        _output.WriteLine($"timeElapsed.TotalSeconds: {timeElapsed.TotalSeconds}");
+        Assert.True(timeElapsed.TotalSeconds >= 60);
+        _output.WriteLine($"source.IsCancellationRequested: {source.IsCancellationRequested}");
+        Assert.True(source.IsCancellationRequested);
     }
 
     [Theory]
@@ -348,9 +356,13 @@ public class SubscriberTests : IAsyncLifetime
         var inMemoryLogger = serviceProvider.GetRequiredService<InMemoryLogger>();
         var errorMessages = inMemoryLogger.Logs.Where(x => x.Message.Contains("Message handling failed unexpectedly for message"));
         Assert.NotEmpty(errorMessages);
+        _output.WriteLine($"errorMessages.Count(): {errorMessages.Count()}");
+        _output.WriteLine($"numberOfMessages: {numberOfMessages}");
         Assert.True(errorMessages.Count() >= numberOfMessages);
-        //Assert.True(timeElapsed.TotalSeconds >= 60);
-        //Assert.True(source.IsCancellationRequested);
+        _output.WriteLine($"timeElapsed.TotalSeconds: {timeElapsed.TotalSeconds}");
+        Assert.True(timeElapsed.TotalSeconds >= 60);
+        _output.WriteLine($"source.IsCancellationRequested: {source.IsCancellationRequested}");
+        Assert.True(source.IsCancellationRequested);
     }
 
     public async Task DisposeAsync()
