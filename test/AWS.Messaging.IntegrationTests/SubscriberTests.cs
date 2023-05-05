@@ -306,8 +306,9 @@ public class SubscriberTests : IAsyncLifetime
         var timeElapsed = DateTime.UtcNow - processStartTime;
 
         var inMemoryLogger = serviceProvider.GetRequiredService<InMemoryLogger>();
-        var errorMessages = inMemoryLogger.Logs.Where(x => x.Message.Equals("_messageConfiguration does not have a valid subscriber mapping for message ID 'AWS.Messaging.IntegrationTests.Models.ChatMessage'"));
+        var errorMessages = inMemoryLogger.Logs.Where(x => x.Message.Equals("Failed to create a MessageEnvelope"));
         Assert.NotEmpty(errorMessages);
+        Assert.Equal(numberOfMessages, errorMessages.Count());
         Assert.True(errorMessages.Count() >= numberOfMessages);
         Assert.True(timeElapsed.TotalSeconds >= 60);
         Assert.True(source.IsCancellationRequested);
@@ -348,6 +349,7 @@ public class SubscriberTests : IAsyncLifetime
         var inMemoryLogger = serviceProvider.GetRequiredService<InMemoryLogger>();
         var errorMessages = inMemoryLogger.Logs.Where(x => x.Message.Contains("Message handling failed unexpectedly for message"));
         Assert.NotEmpty(errorMessages);
+        Assert.Equal(numberOfMessages, errorMessages.Count());
         Assert.True(errorMessages.Count() >= numberOfMessages);
         Assert.True(timeElapsed.TotalSeconds >= 60);
         Assert.True(source.IsCancellationRequested);
