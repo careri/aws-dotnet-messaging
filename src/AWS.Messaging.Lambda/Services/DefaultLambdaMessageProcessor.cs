@@ -1,6 +1,7 @@
 // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
 // SPDX-License-Identifier: Apache-2.0
 
+using System.Threading.Tasks.Dataflow;
 using Amazon.Lambda.SQSEvents;
 using Amazon.SQS;
 using Amazon.SQS.Model;
@@ -46,17 +47,13 @@ internal class DefaultLambdaMessageProcessor : ILambdaMessageProcessor, ISQSMess
         _configuration = configuration;
         _messageManager = messageManagerFactory.CreateMessageManager(this, new MessageManagerConfiguration
         {
-            SupportExtendingVisibilityTimeout = false
+            SupportExtendingVisibilityTimeout = false,
+            MaxNumberOfConcurrentMessages = _configuration.MaxNumberOfConcurrentMessages,
+            FifoProcessing = _configuration.SubscriberEndpoint.EndsWith(".fifo")
         });
 
         _sqsBatchResponse = new SQSBatchResponse();
     }
-
-    /// <summary>
-    /// The maximum amount of time a polling iteration should pause for while waiting
-    /// for in flight messages to finish processing
-    /// </summary>
-    private static readonly TimeSpan CONCURRENT_CAPACITY_WAIT_TIMEOUT = TimeSpan.FromSeconds(30);
 
 
     public async Task<SQSBatchResponse?> ProcessMessagesAsync(CancellationToken token = default)
@@ -67,35 +64,23 @@ internal class DefaultLambdaMessageProcessor : ILambdaMessageProcessor, ISQSMess
             return _sqsBatchResponse;
         }
 
-        var taskList = new List<Task>(sqsEvent.Records.Count);
         var index = 0;
         try
         {
+            var processingQueue = new List<Task>();
             while (!token.IsCancellationRequested && index < sqsEvent.Records.Count)
             {
-                var numberOfMessagesToRead = _configuration.MaxNumberOfConcurrentMessages - _messageManager.ActiveMessageCount;
-
-                // If already processing the maximum number of messages, wait for at least one to complete and then try again
-                if (numberOfMessagesToRead <= 0)
-                {
-                    _logger.LogTrace("The maximum number of {Max} concurrent messages is already being processed. " +
-                        "Waiting for one or more to complete for a maximum of {Timeout} seconds before attempting to poll again.",
-                        _configuration.MaxNumberOfConcurrentMessages, CONCURRENT_CAPACITY_WAIT_TIMEOUT.TotalSeconds);
-
-                    await _messageManager.WaitAsync(CONCURRENT_CAPACITY_WAIT_TIMEOUT);
-                    continue;
-                }
 
                 var message = ConvertToStandardSQSMessage(sqsEvent.Records[index]);
                 var messageEnvelopeResult = await _envelopeSerializer.ConvertToEnvelopeAsync(message);
 
-                // Don't await this result, we want to process multiple messages concurrently.
-                var task = _messageManager.ProcessMessageAsync(messageEnvelopeResult.Envelope, messageEnvelopeResult.Mapping, token);
-                taskList.Add(task);
+                var result = await _envelopeSerializer.ConvertToEnvelopeAsync(message);
+                processingQueue.Add(_messageManager.AddToProcessingQueueAsync(new MessageProcessingTask(result.Envelope, result.Mapping, token)));
                 index++;
             }
 
-            await Task.WhenAll(taskList);
+            await Task.WhenAll(processingQueue);
+            await _messageManager.WaitForCompletionAsync(token);
         }
         catch (Exception ex)
         {

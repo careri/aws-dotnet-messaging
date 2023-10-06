@@ -20,21 +20,14 @@ namespace AWS.Messaging.Services;
 public interface IMessageManager
 {
     /// <summary>
-    /// The number of active messages being processed.
+    /// Schedules the async processing of message.
     /// </summary>
-    int ActiveMessageCount { get; }
+    /// <param name="messageProcessingTask">The input that is sent to the message processing task scheduler</param>
+    Task AddToProcessingQueueAsync(MessageProcessingTask messageProcessingTask);
 
     /// <summary>
-    /// Allows a poller to wait for when <see cref="ActiveMessageCount"/> is next decremented or when the timeout elapses
+    /// Waits for the processing of all in-flight messages.
     /// </summary>
-    /// <param name="timeout">Maximum amount of time to wait</param>
-    Task WaitAsync(TimeSpan timeout);
-
-    /// <summary>
-    /// Start the async processing of a message.
-    /// </summary>
-    /// <param name="messageEnvelope">The message to start processing</param>
-    /// <param name="subscriberMapping">The mapping between the message's type and its handler</param>
-    /// <param name="token">Optional token to cancel the message processing</param>
-    Task ProcessMessageAsync(MessageEnvelope messageEnvelope, SubscriberMapping subscriberMapping, CancellationToken token = default);
+    /// <returns></returns>
+    Task WaitForCompletionAsync(CancellationToken cancellationToken);
 }

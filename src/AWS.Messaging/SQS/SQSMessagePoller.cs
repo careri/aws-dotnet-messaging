@@ -32,12 +32,6 @@ internal class SQSMessagePoller : IMessagePoller, ISQSMessageCommunication
     private const int SQS_MAX_MESSAGE_CHANGE_VISIBILITY = 10;
 
     /// <summary>
-    /// The maximum amount of time a polling iteration should pause for while waiting
-    /// for in flight messages to finish processing
-    /// </summary>
-    private static readonly TimeSpan CONCURRENT_CAPACITY_WAIT_TIMEOUT = TimeSpan.FromMinutes(1);
-
-    /// <summary>
     /// Creates instance of <see cref="AWS.Messaging.SQS.SQSMessagePoller" />
     /// </summary>
     /// <param name="logger">Logger for debugging information.</param>
@@ -64,6 +58,7 @@ internal class SQSMessagePoller : IMessagePoller, ISQSMessageCommunication
     public async Task StartPollingAsync(CancellationToken token = default)
     {
         await PollQueue(token);
+        
     }
 
     /// <summary>
@@ -74,32 +69,12 @@ internal class SQSMessagePoller : IMessagePoller, ISQSMessageCommunication
     {
         while (!token.IsCancellationRequested)
         {
-            var numberOfMessagesToRead = _configuration.MaxNumberOfConcurrentMessages - _messageManager.ActiveMessageCount;
-
-            // If already processing the maximum number of messages, wait for at least one to complete and then try again
-            if (numberOfMessagesToRead <= 0)
-            {
-                _logger.LogTrace("The maximum number of {Max} concurrent messages is already being processed. " +
-                    "Waiting for one or more to complete for a maximum of {Timeout} seconds before attempting to poll again.",
-                    _configuration.MaxNumberOfConcurrentMessages, CONCURRENT_CAPACITY_WAIT_TIMEOUT.TotalSeconds);
-
-                await _messageManager.WaitAsync(CONCURRENT_CAPACITY_WAIT_TIMEOUT);
-                continue;
-            }
-
-            // Only read SQS's maximum number of messages. If configured for
-            // higher concurrency, then the next iteration could read more
-            if (numberOfMessagesToRead > SQS_MAX_NUMBER_MESSAGES_TO_READ)
-            {
-                numberOfMessagesToRead = SQS_MAX_NUMBER_MESSAGES_TO_READ;
-            }
-
             var receiveMessageRequest = new ReceiveMessageRequest
             {
                 QueueUrl = _configuration.SubscriberEndpoint,
                 VisibilityTimeout = _configuration.VisibilityTimeout,
                 WaitTimeSeconds = _configuration.WaitTimeSeconds,
-                MaxNumberOfMessages = numberOfMessagesToRead,
+                MaxNumberOfMessages = Math.Min(SQS_MAX_NUMBER_MESSAGES_TO_READ, _configuration.MaxNumberOfConcurrentMessages),
                 AttributeNames = new List<string> { "All" },
                 MessageAttributeNames = new List<string> { "All" }
             };
@@ -117,7 +92,7 @@ internal class SQSMessagePoller : IMessagePoller, ISQSMessageCommunication
                     receiveMessageResponse.Messages.Count, receiveMessageRequest.QueueUrl, receiveMessageResponse.ResponseMetadata.RequestId);
 
                 receivedMessages = receiveMessageResponse.Messages;
-                }
+            }
             catch (AmazonSQSException ex)
             {
                 _logger.LogError(ex, "An {ExceptionName} occurred while polling", nameof(AmazonSQSException));
@@ -138,25 +113,27 @@ internal class SQSMessagePoller : IMessagePoller, ISQSMessageCommunication
             if (receivedMessages is null)
                 continue;
 
+            var processingQueue = new List<Task>();
             foreach (var message in receivedMessages)
             {
                 try
                 {
-                    var messageEnvelopeResult = await _envelopeSerializer.ConvertToEnvelopeAsync(message);
-
-                    // Don't await this result, we want to process multiple messages concurrently
-                    _ = _messageManager.ProcessMessageAsync(messageEnvelopeResult.Envelope, messageEnvelopeResult.Mapping, token);
-        }
+                    var result = await _envelopeSerializer.ConvertToEnvelopeAsync(message);
+                    processingQueue.Add(_messageManager.AddToProcessingQueueAsync(new MessageProcessingTask(result.Envelope, result.Mapping, token)));
+                }
                 catch (AWSMessagingException)
                 {
                     // Swallow exceptions thrown by the framework, and rely on the thrower to log
-    }
+                }
                 catch (Exception ex)
                 {
-                    // TODO: explore a "cool down mode" for repeated exceptions
-                    _logger.LogError(ex, "An unknown exception occurred while polling {SubscriberEndpoint}", _configuration.SubscriberEndpoint);
+                    _logger.LogError(ex, "An unknown exception occurred while trying to schedule SQS message with ID {messageId} for processing.", message.MessageId);
                 }
             }
+
+            // Note: We aren't waiting until these messages are finished being processed.
+            // We just wait until they are queued in the buffer for processing before fetching the next batch of messages.
+            await Task.WhenAll(processingQueue);
         }
     }
 
@@ -175,21 +152,19 @@ internal class SQSMessagePoller : IMessagePoller, ISQSMessageCommunication
 
         foreach (var message in messages)
         {
-            if (!string.IsNullOrEmpty(message.SQSMetadata?.ReceiptHandle))
-            {
-                _logger.LogTrace("Preparing to delete message {MessageId} with SQS receipt handle {ReceiptHandle} from queue {SubscriberEndpoint}",
-                    message.Id, message.SQSMetadata.ReceiptHandle, _configuration.SubscriberEndpoint);
-                request.Entries.Add(new DeleteMessageBatchRequestEntry()
-                {
-                    Id = message.Id,
-                    ReceiptHandle = message.SQSMetadata.ReceiptHandle
-                });
-            }
-            else
+            if (string.IsNullOrEmpty(message.SQSMetadata?.ReceiptHandle))
             {
                 _logger.LogError("Attempted to delete message {MessageId} from {SubscriberEndpoint} without an SQS receipt handle.", message.Id, _configuration.SubscriberEndpoint);
                 throw new MissingSQSMetadataException($"Attempted to delete message {message.Id} from {_configuration.SubscriberEndpoint} without an SQS receipt handle.");
             }
+
+            _logger.LogTrace("Preparing to delete message {MessageId} with SQS receipt handle {ReceiptHandle} from queue {SubscriberEndpoint}",
+                    message.Id, message.SQSMetadata.ReceiptHandle, _configuration.SubscriberEndpoint);
+            request.Entries.Add(new DeleteMessageBatchRequestEntry()
+            {
+                Id = message.Id,
+                ReceiptHandle = message.SQSMetadata.ReceiptHandle
+            });
         }
 
         try

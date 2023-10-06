@@ -8,4 +8,6 @@ namespace AWS.Messaging.IntegrationTests.Models;
 public class TempStorage<T>
 {
     public ConcurrentBag<MessageEnvelope<T>> Messages { get; set; } = new ConcurrentBag<MessageEnvelope<T>>();
+
+    public ConcurrentQueue<MessageEnvelope<T>> MessagesFifo { get; set;} = new ConcurrentQueue<MessageEnvelope<T>>();
 }

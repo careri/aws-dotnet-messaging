@@ -110,7 +110,9 @@ internal class SQSMessagePollerConfiguration : IMessagePollerConfiguration
             SupportExtendingVisibilityTimeout = true,
             VisibilityTimeout = VisibilityTimeout,
             VisibilityTimeoutExtensionThreshold = VisibilityTimeoutExtensionThreshold,
-            VisibilityTimeoutExtensionHeartbeatInterval = VisibilityTimeoutExtensionHeartbeatInterval
+            VisibilityTimeoutExtensionHeartbeatInterval = VisibilityTimeoutExtensionHeartbeatInterval,
+            MaxNumberOfConcurrentMessages = MaxNumberOfConcurrentMessages,
+            FifoProcessing = SubscriberEndpoint.EndsWith(".fifo")
         };
     }
 }

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 using System.Collections.Concurrent;
-using System.Collections.Generic;
+using System.Threading.Tasks.Dataflow;
 using AWS.Messaging.Configuration;
 using AWS.Messaging.SQS;
 using Microsoft.Extensions.Logging;
@@ -17,13 +17,12 @@ public class DefaultMessageManager : IMessageManager
     private readonly ILogger<DefaultMessageManager> _logger;
     private readonly MessageManagerConfiguration _configuration;
 
-    private readonly object _activeMessageCountLock = new object();
-    private int _activeMessageCount;
-    private readonly ManualResetEventSlim _activeMessageCountDecrementedEvent = new ManualResetEventSlim(false);
-
     private readonly ConcurrentDictionary<MessageEnvelope, InFlightMetadata> _inFlightMessageMetadata = new();
     private readonly object _visibilityTimeoutExtensionTaskLock = new object();
     private Task? _visibilityTimeoutExtensionTask;
+
+    private readonly ActionBlock<MessageProcessingTask> _messageProcessingBlock;
+    private readonly List<ActionBlock<MessageProcessingTask>> _fifoProcessingBlocks = new();
 
     /// <summary>
     /// Constructs an instance of <see cref="DefaultMessageManager"/>
@@ -38,89 +37,69 @@ public class DefaultMessageManager : IMessageManager
         _handlerInvoker = handlerInvoker;
         _logger = logger;
         _configuration = configuration;
-    }
 
-    /// <inheritdoc/>
-    public int ActiveMessageCount
-    {
-        get
+        _messageProcessingBlock = CreateMessageProcessingBlock(_configuration.MaxNumberOfConcurrentMessages, _configuration.MaxNumberOfConcurrentMessages);
+
+        for (var i = 0; i <  _configuration.MaxNumberOfConcurrentMessages; i++)
         {
-            lock (_activeMessageCountLock)
-            {
-                return _activeMessageCount;
-            }
-        }
-    }
-
-    /// <summary>
-    /// Updates <see cref="ActiveMessageCount"/> in a thread safe manner
-    /// </summary>
-    /// <param name="delta">Difference to apply to the current active message count</param>
-    /// <returns>Updated <see cref="ActiveMessageCount"/></returns>
-    private int UpdateActiveMessageCount(int delta)
-    {
-        lock (_activeMessageCountLock)
-        {
-            var newValue = _activeMessageCount + delta;
-            _logger.LogTrace("Updating {ActiveMessageCount} from {Before} to {After}", nameof(ActiveMessageCount), _activeMessageCount, newValue);
-
-            _activeMessageCount = newValue;
-
-            // If we just decremented the active message count, signal to the poller
-            // that there may be more capacity available again.
-            if (delta < 0)
-            {
-                _activeMessageCountDecrementedEvent.Set();
-            }
-
-            return _activeMessageCount;
+            _fifoProcessingBlocks.Add(CreateMessageProcessingBlock(1, 10));
         }
     }
 
     /// <inheritdoc/>
-    public Task WaitAsync(TimeSpan timeout)
+    public async Task AddToProcessingQueueAsync(MessageProcessingTask messageProcessingTask)
     {
-        _logger.LogTrace("Beginning wait for {Name} for a maximum of {Timeout} seconds", nameof(_activeMessageCountDecrementedEvent), timeout.TotalSeconds);
-
-        // TODO: Rework to avoid this synchronous wait.
-        // See https://github.com/dotnet/runtime/issues/35962 for potential workarounds
-        var wasSet = _activeMessageCountDecrementedEvent.Wait(timeout);
-
-        // Don't reset if we hit the timeout
-        if (wasSet)
-        {
-            _logger.LogTrace("{Name} was set, resetting the event", nameof(_activeMessageCountDecrementedEvent));
-            _activeMessageCountDecrementedEvent.Reset();
-        }
-        else
-        {
-            _logger.LogTrace("Timed out at {Timeout} seconds while waiting for {Name}, returning.", timeout.TotalSeconds, nameof(_activeMessageCountDecrementedEvent));
-        }
-
-        return Task.CompletedTask;
-    }
-
-    /// <inheritdoc/>
-    public async Task ProcessMessageAsync(MessageEnvelope messageEnvelope, SubscriberMapping subscriberMapping, CancellationToken token = default)
-    {
-        UpdateActiveMessageCount(1);
-
-        // Start the handler task (but not await it), and set the timestamp that the initial visibility timeout window is expected to expire
-        var metadata = new InFlightMetadata(
-            _handlerInvoker.InvokeAsync(messageEnvelope, subscriberMapping, token),
-            DateTimeOffset.UtcNow + TimeSpan.FromSeconds(_configuration.VisibilityTimeout)
-        );
-
-        // Add that metadata to the dictionary of running handlers, used to extend the visibility timeout if necessary
-        _inFlightMessageMetadata.TryAdd(messageEnvelope, metadata);
+        _inFlightMessageMetadata.TryAdd(messageProcessingTask.MessageEnvelope, new InFlightMetadata(
+            DateTimeOffset.UtcNow + TimeSpan.FromSeconds(_configuration.VisibilityTimeout)));
 
         if (_configuration.SupportExtendingVisibilityTimeout)
-            StartMessageVisibilityExtensionTaskIfNotRunning(token);
+            StartMessageVisibilityExtensionTaskIfNotRunning(messageProcessingTask.CancellationToken);
+
+        if (!_configuration.FifoProcessing)
+        {
+            await _messageProcessingBlock.SendAsync(messageProcessingTask);
+            return;
+        }
+
+        var messageGroupId = messageProcessingTask.MessageEnvelope.SQSMetadata?.MessageGroupId;
+        if (string.IsNullOrEmpty(messageGroupId))
+        {
+            _logger.LogError("Message with ID {messageProcessingTask.MessageEnvelope.Id} could not be added for Fifo processing since it had an empty message group ID", messageProcessingTask.MessageEnvelope.Id);
+            throw new InvalidOperationException($"Message with ID {messageProcessingTask.MessageEnvelope.Id} could not be added for Fifo processing since it had an empty message group ID");
+        }
+
+        var totalFifoProcessingBlocks = _fifoProcessingBlocks.Count;
+        await _fifoProcessingBlocks[messageGroupId.GetHashCode() % totalFifoProcessingBlocks].SendAsync(messageProcessingTask);   
+    }
+
+    /// <inheritdoc/>
+    public async Task WaitForCompletionAsync(CancellationToken token = default)
+    {
+        if (!_configuration.FifoProcessing)
+        {
+            _messageProcessingBlock.Complete();
+            await _messageProcessingBlock.Completion.WaitAsync(token);
+            return;
+        }
+
+        var fifoProcessingBlockCompletion = new List<Task>();
+        foreach (var fifoProcessingBlock in _fifoProcessingBlocks)
+        {
+            fifoProcessingBlock.Complete();
+            fifoProcessingBlockCompletion.Add(fifoProcessingBlock.Completion.WaitAsync(token));
+        }
+        await Task.WhenAll(fifoProcessingBlockCompletion);
+    }
+
+    /// <inheritdoc/>
+    private async Task ProcessMessageAsync(MessageEnvelope messageEnvelope, SubscriberMapping subscriberMapping, CancellationToken token = default)
+    {
+        var handlerTask = _handlerInvoker.InvokeAsync(messageEnvelope, subscriberMapping, token);
 
         // Wait for the handler to finish processing the message
         try
         {
-            await metadata.HandlerTask;
+            await handlerTask;
         }
         catch (AWSMessagingException)
         {
@@ -133,9 +112,9 @@ public class DefaultMessageManager : IMessageManager
 
         _inFlightMessageMetadata.Remove(messageEnvelope, out _);
 
-        if (metadata.HandlerTask.IsCompletedSuccessfully)
+        if (handlerTask.IsCompletedSuccessfully)
         {
-            if (metadata.HandlerTask.Result.IsSuccess)
+            if (handlerTask.Result.IsSuccess)
             {
                 // Delete the message from the queue if it was processed successfully
                 await _sqsMessageCommunication.DeleteMessagesAsync(new MessageEnvelope[] { messageEnvelope });
@@ -146,13 +125,11 @@ public class DefaultMessageManager : IMessageManager
                 await _sqsMessageCommunication.ReportMessageFailureAsync(messageEnvelope);
             }
         }
-        else if (metadata.HandlerTask.IsFaulted)
+        else if (handlerTask.IsFaulted)
         {
-            _logger.LogError(metadata.HandlerTask.Exception, "Message handling failed unexpectedly for message ID {MessageId}", messageEnvelope.Id);
+            _logger.LogError(handlerTask.Exception, "Message handling failed unexpectedly for message ID {MessageId}", messageEnvelope.Id);
             await _sqsMessageCommunication.ReportMessageFailureAsync(messageEnvelope);
         }
-
-        UpdateActiveMessageCount(-1);
     }
 
     /// <summary>
@@ -210,5 +187,20 @@ public class DefaultMessageManager : IMessageManager
                 await _sqsMessageCommunication.ExtendMessageVisibilityTimeoutAsync(unfinishedMessages.Select(messageAndMetadata => messageAndMetadata.Key), token);
             }
         } while (_inFlightMessageMetadata.Any() && !token.IsCancellationRequested);
+    }
+
+    private ActionBlock<MessageProcessingTask> CreateMessageProcessingBlock(int maxNumberofConcurrentMessages, int bufferCapacity)
+    {
+        return new ActionBlock<MessageProcessingTask>(
+            async task =>
+            {
+                await ProcessMessageAsync(task.MessageEnvelope, task.SubscriberMapping, task.CancellationToken);
+            },
+            new ExecutionDataflowBlockOptions
+            {
+                MaxDegreeOfParallelism = maxNumberofConcurrentMessages,
+                BoundedCapacity = bufferCapacity,
+                SingleProducerConstrained = true
+            });
     }
 }

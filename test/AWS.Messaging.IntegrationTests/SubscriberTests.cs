@@ -98,7 +98,7 @@ public class SubscriberTests : IAsyncLifetime
             builder.AddSQSPoller(_sqsQueueUrl, options =>
             {
                 options.VisibilityTimeout = 5; // 5s will require a visibility timeout extension due to the 10s handler below
-                options.VisibilityTimeoutExtensionThreshold = 3; // and a message is eligible for extension after it's been processing at least 3 seconds
+                options.VisibilityTimeoutExtensionThreshold = 3; // and a message is eligible for extension when it's visibility timeout is set to expire within 3 seconds.
                 options.MaxNumberOfConcurrentMessages = maxConcurrentMessages;
             });
             builder.AddMessageHandler<ChatMessageHandler_10sDelay, ChatMessage>();

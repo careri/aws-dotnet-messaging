@@ -20,6 +20,18 @@ public class MessageManagerConfiguration
     /// </summary>
     public bool SupportExtendingVisibilityTimeout { get; set; } = true;
 
+    /// <summary>
+    /// Maximum number of messages to process concurrently.
+    /// </summary>
+    /// <remarks>The default value is 10</remarks>
+
+    public int MaxNumberOfConcurrentMessages { get; set; } = SQSMessagePollerConfiguration.DEFAULT_MAX_NUMBER_OF_CONCURRENT_MESSAGES;
+
+    /// <summary>
+    /// Indicates whether the message manager should process messages in FIFO order.
+    /// </summary>
+    public bool FifoProcessing { get; set; } = false;
+
     /// <inheritdoc cref="SQSMessagePollerConfiguration.VisibilityTimeout"/>
     internal int VisibilityTimeout { get; set; } = SQSMessagePollerConfiguration.DEFAULT_VISIBILITY_TIMEOUT_SECONDS;
 

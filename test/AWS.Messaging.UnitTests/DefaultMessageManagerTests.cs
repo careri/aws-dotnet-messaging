@@ -33,7 +33,8 @@ namespace AWS.Messaging.UnitTests
             var messsageEnvelope = new MessageEnvelope<ChatMessage> { Id = "1" };
             var subscriberMapping = new SubscriberMapping(typeof(ChatMessageHandler), typeof(ChatMessage));
 
-            await manager.ProcessMessageAsync(messsageEnvelope, subscriberMapping);
+            await manager.AddToProcessingQueueAsync(new MessageProcessingTask(messsageEnvelope, subscriberMapping));
+            await manager.WaitForCompletionAsync();
 
             // Verify that the handler was invoked once with the expected message and mapping
             mockHandlerInvoker.VerifyInvokeAsyncWasCalledWith(messsageEnvelope, subscriberMapping, Times.Once());
@@ -43,9 +44,6 @@ namespace AWS.Messaging.UnitTests
 
             // Since the handler succeeds right away, verify the visiblity was never extended
             mockSQSMessageCommunication.VerifyExtendMessageVisibilityTimeoutAsync(new[] { messsageEnvelope }, Times.Never());
-
-            // Verify that the active message count was deprecated back to 0
-            Assert.Equal(0, manager.ActiveMessageCount);
 
             // Verify that there were no expected poller/handler calls
             mockSQSMessageCommunication.VerifyNoOtherCalls();
@@ -66,7 +64,8 @@ namespace AWS.Messaging.UnitTests
             var messsageEnvelope = new MessageEnvelope<ChatMessage> { Id = "1" };
             var subscriberMapping = new SubscriberMapping(typeof(ChatMessageHandler), typeof(ChatMessage));
 
-            await manager.ProcessMessageAsync(messsageEnvelope, subscriberMapping);
+            await manager.AddToProcessingQueueAsync(new MessageProcessingTask(messsageEnvelope, subscriberMapping));
+            await manager.WaitForCompletionAsync();
 
             // Verify that the handler was invoked once with the expected message and mapping
             mockHandlerInvoker.VerifyInvokeAsyncWasCalledWith(messsageEnvelope, subscriberMapping, Times.Once());
@@ -79,9 +78,6 @@ namespace AWS.Messaging.UnitTests
 
             // Since the handler fails right away, verify the visiblity was never extended
             mockSQSMessageCommunication.VerifyExtendMessageVisibilityTimeoutAsync(new[] { messsageEnvelope }, Times.Never());
-
-            // Verify that the active message count was deprecated back to 0
-            Assert.Equal(0, manager.ActiveMessageCount);
 
             // Verify that there were no expected poller/handler calls
             mockSQSMessageCommunication.VerifyNoOtherCalls();
@@ -110,14 +106,11 @@ namespace AWS.Messaging.UnitTests
             var message1 = new MessageEnvelope<ChatMessage>() { Id = "1" };
             var message2 = new MessageEnvelope<ChatMessage>() { Id = "2" };
 
-            var message1Task = manager.ProcessMessageAsync(message1, subscriberMapping);
-            var message2Task = manager.ProcessMessageAsync(message2, subscriberMapping);
-
-            // Don't await the tasks yet,so we can assert that ActiveMessageCount was incremented while the handlers are still processing
-            Assert.Equal(2, manager.ActiveMessageCount);
+            await manager.AddToProcessingQueueAsync(new MessageProcessingTask(message1, subscriberMapping));
+            await manager.AddToProcessingQueueAsync(new MessageProcessingTask(message2, subscriberMapping));
 
             // Now finish awaiting the handlers
-            await Task.WhenAll(message1Task, message2Task);
+            await manager.WaitForCompletionAsync();
 
             // Verify that the handler was invoked with the expected messages and mapping
             mockHandlerInvoker.VerifyInvokeAsyncWasCalledWith(message1, subscriberMapping, Times.Once());
@@ -135,9 +128,6 @@ namespace AWS.Messaging.UnitTests
             // ExtendMessageVisibilityTimeoutAsync being called with only a single message since
             // we expect these to have the same lifecycle
             mockHandlerInvoker.VerifyNoOtherCalls();
-
-            // Verify that the active message count was deprecated back to 0
-            Assert.Equal(0, manager.ActiveMessageCount);
         }
 
         /// <summary>
@@ -161,16 +151,16 @@ namespace AWS.Messaging.UnitTests
 
             // Start handling a single message
             var earlyMessage = new MessageEnvelope<ChatMessage>() { Id = "1" };
-            var earlyTask = manager.ProcessMessageAsync(earlyMessage, subscriberMapping);
+            await manager.AddToProcessingQueueAsync(new MessageProcessingTask(earlyMessage, subscriberMapping));
 
             // Delay, then start handling another message
             await Task.Delay(TimeSpan.FromSeconds(3));
 
             var laterMessage = new MessageEnvelope<ChatMessage>() { Id = "2" };
-            var laterTask = manager.ProcessMessageAsync(laterMessage, subscriberMapping);
+            await manager.AddToProcessingQueueAsync(new MessageProcessingTask(laterMessage, subscriberMapping));
 
             // Now finish awaiting the handlers
-            await Task.WhenAll(earlyTask, laterTask);
+            await manager.WaitForCompletionAsync();
 
             // Verify that the handler was invoked with the expected messages and mapping
             mockHandlerInvoker.VerifyInvokeAsyncWasCalledWith(earlyMessage, subscriberMapping, Times.Once());
@@ -192,39 +182,6 @@ namespace AWS.Messaging.UnitTests
             // M2 |       |                 | Start  |        | Extend | Extend | Finish |
             mockSQSMessageCommunication.VerifyNoOtherCalls();
             mockHandlerInvoker.VerifyNoOtherCalls();
-
-            // Verify that the active message count was deprecated back to 0
-            Assert.Equal(0, manager.ActiveMessageCount);
-        }
-
-        /// <summary>
-        /// Queues many message handling tasks for a single message manager to ensure that it
-        /// is managing its active message count in a thread safe manner
-        /// </summary>
-        [Fact]
-        public async Task DefaultMessageManager_CountsActiveMessagesCorrectly()
-        {
-            var mockSQSMessageCommunication = CreateMockSQSMessageCommunication();
-            var mockHandlerInvoker = CreateMockHandlerInvoker(MessageProcessStatus.Success(), TimeSpan.FromSeconds(1));
-
-            var manager = new DefaultMessageManager(mockSQSMessageCommunication.Object, mockHandlerInvoker.Object, new NullLogger<DefaultMessageManager>(), new MessageManagerConfiguration());
-            var subscriberMapping = new SubscriberMapping(typeof(ChatMessageHandler), typeof(ChatMessage));
-           
-            var tasks = new List<Task>();
-
-            for (int i = 0; i < 100; i++)
-            {
-                var messsageEnvelope = new MessageEnvelope<ChatMessage>()
-                {
-                    Id = i.ToString()
-                };
-                tasks.Add(manager.ProcessMessageAsync(messsageEnvelope, subscriberMapping));
-            }
-
-            await Task.WhenAll(tasks);
-
-            // Verify that the active message count was deprecated back to 0
-            Assert.Equal(0, manager.ActiveMessageCount);
         }
 
         /// <summary>
