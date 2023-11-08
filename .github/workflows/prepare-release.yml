@@ -25,3 +25,17 @@ jobs:
       run: |
         version=$(versionize inspect)
         echo "::set-output name=VERSION::$version"
+    
+    - name: Version Bump
+      run: |
+        versionize --changelog-all
+    
+    - name: Pull Request
+      id: pull-request
+      uses: repo-sync/pull-request@v2
+      with:
+        destination_branch: "main"
+        pr_title: 'chore: release ${{ steps.read-current-version.outputs.VERSION }}'
+        pr_body: "Pulling ${{ github.ref }} into main."
+        github_token: ${{ secrets.GITHUB_TOKEN }}
+        pr_label: "auto-pr"
