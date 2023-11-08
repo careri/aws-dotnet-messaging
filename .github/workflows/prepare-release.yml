@@ -1,0 +1,27 @@
+name: Prepare Release
+
+on:
+  workflow_dispatch:
+
+jobs:
+  pulling-into-main:
+    name: Pulling into main
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v2
+    
+    - name: Setup .NET Core 6.0
+      uses: actions/setup-dotnet@v3
+      with:
+        dotnet-version: 6.0.x
+    
+    - name: Install Versionize
+      run: dotnet tool install --global Versionize
+
+    - name: Read Current Version
+      id: read-current-version
+      run: |
+        version=$(versionize inspect)
+        echo "::set-output name=VERSION::$version"

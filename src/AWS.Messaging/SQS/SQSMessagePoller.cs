@@ -124,7 +124,7 @@ internal class SQSMessagePoller : IMessagePoller, ISQSMessageCommunication
 
                 // Rethrow the exception to fail fast for invalid configuration, permissioning, etc.
                 // TODO: explore a "cool down mode" for repeated exceptions
-                if (IsSQSExceptionFatal(ex))
+                if (_configuration.IsSQSExceptionFatal(ex))
                 {
                     throw;
                 }
@@ -213,7 +213,7 @@ internal class SQSMessagePoller : IMessagePoller, ISQSMessageCommunication
                 string.Join(", ", messages.Select(x => x.Id)), _configuration.SubscriberEndpoint);
 
             // Rethrow the exception to fail fast for invalid configuration, permissioning, etc.
-            if (IsSQSExceptionFatal(ex))
+            if (_configuration.IsSQSExceptionFatal(ex))
             {
                 throw;
             }
@@ -295,8 +295,20 @@ internal class SQSMessagePoller : IMessagePoller, ISQSMessageCommunication
 
                 foreach (var failedMessage in response.Failed)
                 {
-                    _logger.LogError("Failed to extend the visibility of message {FailedMessageId} on queue {SubscriberEndpoint}: {FailedMessage}",
-                        failedMessage.Id, _configuration.SubscriberEndpoint, failedMessage.Message);
+                    // It's possible that the task that is extending the message visibility timeout of in flight messages attempts to extend
+                    // a message whose handler task has just finished and deleted the message. Rather than adding synchronization between the two
+                    // (such as stopping handlers from deleting while the extension task is running), we "downgrade" these errors to trace messages
+                    if (failedMessage.Code.Equals("ReceiptHandleIsInvalid") &&
+                        failedMessage.Message.Equals("Message does not exist or is not available for visibility timeout change", StringComparison.InvariantCultureIgnoreCase))
+                    {
+                        _logger.LogTrace("Failed to extend the visibility of message {FailedMessageId} on queue {SubscriberEndpoint} with code {Code}, which was likely deleted: {FailedMessage}",
+                            failedMessage.Id, _configuration.SubscriberEndpoint, failedMessage.Code, failedMessage.Message);
+                    }
+                    else // treat any other failed entries as errors
+                    {
+                        _logger.LogError("Failed to extend the visibility of message {FailedMessageId} on queue {SubscriberEndpoint} with code {Code}: {FailedMessage}",
+                            failedMessage.Id, _configuration.SubscriberEndpoint, failedMessage.Code, failedMessage.Message);
+                    }
                 }
             }
             else
@@ -307,7 +319,7 @@ internal class SQSMessagePoller : IMessagePoller, ISQSMessageCommunication
                         string.Join(", ", messages.Select(x => x.Id)), _configuration.SubscriberEndpoint);
 
                     // Rethrow the exception to fail fast for invalid configuration, permissioning, etc.
-                    if (IsSQSExceptionFatal(amazonEx))
+                    if (_configuration.IsSQSExceptionFatal(amazonEx))
                     {
                         throw amazonEx;
                     }
@@ -326,22 +338,5 @@ internal class SQSMessagePoller : IMessagePoller, ISQSMessageCommunication
     {
         return ValueTask.CompletedTask;
     }
-
-    /// <summary>
-    /// <see cref="AmazonSQSException"/> error codes that should be treated as fatal and stop the poller
-    /// </summary>
-    private static readonly HashSet<string> _fatalSQSErrorCodes = new HashSet<string>
-    {
-        "InvalidAddress",   // Returned for an invalid queue URL
-        "AccessDenied"      // Returned with insufficient IAM permissions to read from the configured queue
-    };
-
-    /// <summary>
-    /// Determines if a given SQS exception should be treated as fatal and rethrown to stop the poller
-    /// </summary>
-    /// <param name="sqsException">SQS Exception</param>
-    private bool IsSQSExceptionFatal(AmazonSQSException sqsException)
-    {
-        return _fatalSQSErrorCodes.Contains(sqsException.ErrorCode);
-    }
+      
 }
